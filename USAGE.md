@@ -67,12 +67,19 @@ print("Upload successful:", result["success"])
 ### Chrome Data
 - **Passwords**: Saved login credentials (decrypted using macOS Keychain)
 - **Cookies**: Session cookies and authentication tokens  
+- **Discord Tokens**: Discord authentication tokens from browser storage
+- **Browser History**: URLs, titles, visit counts, and timestamps
+- **LocalStorage**: Key-value pairs stored by websites
+- **Autofill Data**: Credit cards, addresses, and other saved form data
+- **Extensions**: Installed browser extensions and their details
 - **Bookmarks**: All saved bookmarks
 - **Profiles**: Multiple Chrome profiles and their settings
 - **Preferences**: Browser settings and installed extensions
 
 ### File System Data
 - **User Files**: Desktop, Documents, Downloads, Pictures, Movies, Music, Public
+- **System Files**: Applications, Library files, Preferences
+- **Sensitive Files**: SSH keys, AWS credentials, bash history, keychain files, config files
 - **Applications**: Installed applications from /Applications and /System/Applications
 - **File Metadata**: Size, modification date, permissions, file extensions
 

