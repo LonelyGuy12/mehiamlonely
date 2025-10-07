@@ -24,6 +24,7 @@ def read_requirements():
         "pycryptodome",
         "aiofiles",
         "psutil",
+        "aiohttp",
     ]
     return requirements
 

