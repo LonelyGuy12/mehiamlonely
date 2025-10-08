@@ -1,5 +1,5 @@
 #!/bin/bash
-
+# Testing phase!
 # Exit on any error
 set -e
 
